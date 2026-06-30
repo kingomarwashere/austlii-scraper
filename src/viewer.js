@@ -9,7 +9,7 @@ import { readStatus } from './status.js';
 import { AREAS, getArea, corpusSearch, situationIntake, buildArgument, summariseCase } from './research.js';
 import { modelStatus, setKey, getKeys as gk, MODELS, DEFAULT_MODEL } from './ai.js';
 import { initCasesTables, getCases, getCase, createCase, updateCase, deleteCase, upsertTask, deleteTask, addEvent, deleteEvent, addDocument, toggleDocument, deleteDocument, TASK_TEMPLATES } from './cases.js';
-import { searchNSWCaselaw, COURT_RESOURCES } from './courtlink.js';
+import { searchNSWCaselaw, COURT_RESOURCES, loginNSWRegistry, submitNSW2FA, scrapeRegistryCases, scrapeRegistryCaseDetail, closeRegistryBrowser } from './courtlink.js';
 
 const PORT          = process.env.PORT || 4242;
 const ADMIN_PASSWORD = 'boob';
@@ -515,8 +515,10 @@ const HTML = `<!DOCTYPE html>
   <div style="background:var(--s1);border-bottom:1px solid var(--bd);padding:12px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0">
     <div style="font-size:13px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:var(--accent)">⚡ WAR ROOM</div>
     <div style="font-size:11px;color:var(--t3)">Your cases. Your fight.</div>
-    <div style="margin-left:auto;display:flex;gap:8px">
+    <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
       <button class="bp" style="font-size:11px;padding:5px 12px;letter-spacing:.05em" onclick="showAddCase()">+ New Case</button>
+      <button class="bg" style="font-size:11px;padding:5px 12px;background:var(--pdim);border-color:var(--purple);color:var(--purple)" onclick="syncRegistry()" id="btn-registry-sync">⟳ Sync Registry</button>
+      <div id="registry-sync-status" style="font-size:10px;color:var(--t3)"></div>
       <button class="bg" style="font-size:11px;padding:5px 10px" onclick="switchTab('search')">✕ Close</button>
     </div>
   </div>
@@ -890,6 +892,119 @@ async function searchCaselaw(){
     <div class="cr-meta">\${esc(c.court)} \${c.date?'· '+esc(c.date):''}</div>
     \${c.summary?\`<div class="cr-snip">\${esc(c.summary)}</div>\`:''}
   </div>\`).join('')+'</div>';
+}
+
+// ── NSW Registry sync ─────────────────────────────────────────────────────────
+async function syncRegistry(){
+  const btn=$('btn-registry-sync'), st=$('registry-sync-status');
+  btn.disabled=true; btn.textContent='Syncing…'; st.textContent=''; st.style.color='var(--t3)';
+
+  // Prompt for party name if not configured
+  let partyName = '';
+  try {
+    const ms = await (await fetch('/api/models')).json();
+    partyName = ms.keys.registry_name || '';
+    if (!ms.keys.registry_user || !ms.keys.registry_pass) {
+      st.style.color='var(--amber)'; st.textContent='Add Registry login in ⚙ Settings first';
+      btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+    }
+    if (!partyName) {
+      partyName = prompt('Enter your full legal name as it appears in court documents (e.g. SMITH JOHN):') || '';
+      if (!partyName.trim()) { btn.disabled=false; btn.textContent='⟳ Sync Registry'; return; }
+    }
+  } catch(e) { st.style.color='var(--red)'; st.textContent='Error: '+e.message; btn.disabled=false; btn.textContent='⟳ Sync Registry'; return; }
+
+  try {
+    st.textContent='Logging in to NSW Registry…';
+    // Pre-login so we can handle 2FA before the sync
+    const keys2 = await (await fetch('/api/models')).json();
+    const loginR = await fetch('/api/registry/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:keys2.keys.registry_user, password:keys2.keys.registry_pass})});
+    const loginD = await loginR.json();
+    if (loginD.needs_2fa) {
+      st.style.color='var(--amber)'; st.textContent='2FA required…';
+      const code = prompt('NSW Registry sent you a verification code.\\nEnter it here:');
+      if (!code) { btn.disabled=false; btn.textContent='⟳ Sync Registry'; st.textContent='Cancelled.'; return; }
+      const r2fa = await fetch('/api/registry/2fa', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code})});
+      const d2fa = await r2fa.json();
+      if (!d2fa.ok) { st.style.color='var(--red)'; st.textContent='2FA error: '+(d2fa.error||'failed'); btn.disabled=false; btn.textContent='⟳ Sync Registry'; return; }
+      st.textContent='2FA accepted. Fetching cases…';
+    } else if (!loginD.ok) {
+      st.style.color='var(--red)'; st.textContent='Login error: '+(loginD.error||'failed');
+      btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+    } else { st.textContent='Logged in. Fetching cases…'; }
+
+    const r = await fetch('/api/registry/sync', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({partyName})});
+    const d = await r.json();
+
+    if (!d.ok) {
+      st.style.color='var(--red)'; st.textContent='Error: '+(d.error||'Unknown error');
+      // Show debug nav links if available
+      if (d.debug?.navLinks?.length) {
+        console.log('[Registry] Nav links found after login:', d.debug.navLinks);
+        st.textContent += ' (check console for nav links)';
+      }
+      btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+    }
+
+    const cases = d.cases || [];
+    if (!cases.length) {
+      st.style.color='var(--amber)';
+      st.textContent = d.message || 'No cases found for "'+partyName+'"';
+      if (d.rawText) { console.log('[Registry] Raw page text:', d.rawText); st.textContent += ' (see console)'; }
+      btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+    }
+
+    // Import cases that don't already exist (match by matter number)
+    const existing = await (await fetch('/api/cases')).json();
+    const existingNums = new Set(existing.map(c=>c.matter_number).filter(Boolean));
+    let added=0, skipped=0;
+
+    for (const rc of cases) {
+      const mn = (rc.matter_number||'').trim();
+      if (mn && existingNums.has(mn)) { skipped++; continue; }
+      // Map registry fields to our case format
+      const newCase = {
+        title:         rc.title || rc.matter_number || 'Registry Case',
+        court:         rc.court || 'NSW Court',
+        matter_number: rc.matter_number || '',
+        status:        mapRegistryStatus(rc.status),
+        next_date:     parseRegistryDate(rc.next_date),
+        notes:         rc.parties ? 'Parties: '+rc.parties : '',
+        jurisdiction:  'nsw',
+        area_of_law:   '',
+      };
+      await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(newCase)});
+      added++;
+    }
+
+    st.style.color='var(--green)';
+    st.textContent=\`✓ Synced: \${added} added, \${skipped} already existed\`;
+    await loadWarRoom(); // refresh case list
+  } catch(e) {
+    st.style.color='var(--red)'; st.textContent='Error: '+e.message;
+  }
+  btn.disabled=false; btn.textContent='⟳ Sync Registry';
+}
+
+function mapRegistryStatus(s) {
+  if (!s) return 'active';
+  const sl = s.toLowerCase();
+  if (sl.includes('finalised')||sl.includes('disposed')||sl.includes('judgment')) return 'won';
+  if (sl.includes('withdrawn')||sl.includes('dismissed')) return 'lost';
+  if (sl.includes('settled')||sl.includes('consent')) return 'settled';
+  return 'active';
+}
+
+function parseRegistryDate(s) {
+  if (!s) return null;
+  // DD/MM/YYYY
+  const p1 = s.match(/(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+  if (p1) return p1[3]+'-'+p1[2].padStart(2,'0')+'-'+p1[1].padStart(2,'0');
+  // DD Mon YYYY
+  const MONTHS={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12'};
+  const p2 = s.match(/(\\d{1,2})[\\s-](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\\s-](\\d{4})/i);
+  if (p2) return p2[3]+'-'+(MONTHS[p2[2].toLowerCase().slice(0,3)]||'01')+'-'+p2[1].padStart(2,'0');
+  return null;
 }
 
 function researchThisCase(){
@@ -1380,11 +1495,13 @@ async function openSettings(){
   $('setpanel').classList.add('open');
   const ms=await (await fetch('/api/models')).json();
   $('setbody').innerHTML=\`
-    <p style="font-size:12px;color:var(--t2)">Add API keys to enable AI features. Keys are stored in your local .env file.</p>
+    <p style="font-size:12px;color:var(--t2);margin-bottom:12px">Keys stored in your local .env file. Leave blank to keep existing value.</p>
+
+    <div class="sh" style="margin-bottom:10px;color:var(--accent)">AI API Keys</div>
     \${[
-      {k:'anthropic',label:'Anthropic (Claude)',hint:'Get at console.anthropic.com'},
-      {k:'openai',   label:'OpenAI (GPT-4o)',   hint:'Get at platform.openai.com'},
-      {k:'gemini',   label:'Google (Gemini)',    hint:'Get at aistudio.google.com'},
+      {k:'anthropic',label:'Anthropic (Claude)',hint:'console.anthropic.com'},
+      {k:'openai',   label:'OpenAI (GPT-4o)',   hint:'platform.openai.com'},
+      {k:'gemini',   label:'Google (Gemini)',    hint:'aistudio.google.com'},
     ].map(({k,label,hint})=>\`
       <div class="setrow">
         <label>\${label}</label>
@@ -1395,10 +1512,27 @@ async function openSettings(){
         </div>
       </div>
     \`).join('')}
-    <button class="bp" onclick="saveKeys()">Save keys</button>
+
+    <div class="sh" style="margin:16px 0 10px;color:var(--accent)">NSW Online Registry</div>
+    <p style="font-size:11px;color:var(--t2);margin-bottom:10px">Login to auto-sync your cases from the NSW Courts registry.</p>
+    <div class="setrow">
+      <label>Registry Username</label>
+      <input type="text" id="key-registry_user" placeholder="Your lawlink.nsw.gov.au username" value="\${ms.keys.registry_user?'••••••':''}">
+    </div>
+    <div class="setrow">
+      <label>Registry Password</label>
+      <input type="password" id="key-registry_pass" placeholder="Your password" value="\${ms.keys.registry_pass?'••••••••':''}">
+    </div>
+    <div class="setrow">
+      <label>Your Full Legal Name</label>
+      <input type="text" id="key-registry_name" placeholder="e.g. SMITH JOHN MICHAEL — as it appears in court docs" value="\${esc(ms.keys.registry_name||'')}">
+      <div style="font-size:10px;color:var(--t3);margin-top:3px">Used to search for your cases. Usually SURNAME FIRSTNAME.</div>
+    </div>
+
+    <button class="bp" onclick="saveKeys()" style="margin-top:14px">Save all</button>
     <button class="bg" onclick="closeSettings()">Cancel</button>
-    <div id="set-msg" style="font-size:12px;color:var(--green);min-height:16px"></div>
-    <div style="border-top:1px solid var(--bd);padding-top:12px">
+    <div id="set-msg" style="font-size:12px;color:var(--green);min-height:16px;margin-top:8px"></div>
+    <div style="border-top:1px solid var(--bd);padding-top:12px;margin-top:4px">
       <div class="sh" style="margin-bottom:8px">Available models</div>
       \${ms.models.map(m=>\`<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:12px">
         <div style="width:7px;height:7px;border-radius:50%;background:\${m.available?'var(--green)':'var(--t3)'};flex-shrink:0"></div>
@@ -1412,14 +1546,14 @@ function closeSettings(){$('setpanel').classList.remove('open')}
 
 async function saveKeys(){
   const keys={};
-  ['anthropic','openai','gemini'].forEach(k=>{
+  ['anthropic','openai','gemini','registry_user','registry_pass','registry_name'].forEach(k=>{
     const el=$('key-'+k);
     if(el&&el.value&&!el.value.includes('•')) keys[k]=el.value.trim();
   });
-  if(!Object.keys(keys).length){$('set-msg').textContent='No new keys entered.';return}
+  if(!Object.keys(keys).length){$('set-msg').textContent='No new values entered.';return}
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys})});
   const d=await r.json();
-  if(d.ok){$('set-msg').textContent='✓ Saved! Refreshing models…';setTimeout(openSettings,800)}
+  if(d.ok){$('set-msg').textContent='✓ Saved!';setTimeout(openSettings,800)}
   else $('set-msg').style.color='var(--red)',($('set-msg').textContent=d.error||'Error');
 }
 
@@ -1822,6 +1956,36 @@ const server = createServer(async (req, res) => {
   if (docToggle && req.method==='POST') { toggleDocument(parseInt(docToggle[2],10)); return jres(res,{ok:true}); }
   const docDel = path.match(/^\/api\/cases\/(\d+)\/documents\/(\d+)$/);
   if (docDel && req.method==='DELETE') { deleteDocument(parseInt(docDel[2],10)); return jres(res,{ok:true}); }
+
+  // ── NSW Registry ──
+  if (path==='/api/registry/login' && req.method==='POST') {
+    const { username, password } = JSON.parse(await body(req));
+    const result = await loginNSWRegistry(username, password);
+    return jres(res, result, result.ok ? 200 : result.needs_2fa ? 202 : 401);
+  }
+  if (path==='/api/registry/2fa' && req.method==='POST') {
+    const { code } = JSON.parse(await body(req));
+    const result = await submitNSW2FA(code);
+    return jres(res, result, result.ok ? 200 : 401);
+  }
+  if (path==='/api/registry/sync' && req.method==='POST') {
+    const keys = gk();
+    const partyName = (JSON.parse(await body(req)).partyName || keys.registry_name || '').trim();
+    if (!partyName) return jres(res, { ok: false, error: 'No party name — set it in Settings' }, 400);
+    // Auto-login if credentials stored
+    const { registry_user: u, registry_pass: p } = keys;
+    if (u && p) {
+      const login = await loginNSWRegistry(u, p);
+      if (!login.ok) return jres(res, { ok: false, error: 'Registry login failed: ' + login.error }, 401);
+    }
+    const result = await scrapeRegistryCases(partyName);
+    return jres(res, result);
+  }
+  if (path==='/api/registry/case' && req.method==='POST') {
+    const { url: caseUrl } = JSON.parse(await body(req));
+    const result = await scrapeRegistryCaseDetail(caseUrl);
+    return jres(res, result);
+  }
 
   // Fallback
   if (!res.writableEnded) { res.writeHead(404); res.end(); }

@@ -34,19 +34,29 @@ function loadEnv() {
 export function getKeys() {
   const env = loadEnv();
   return {
-    anthropic: env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || '',
-    openai:    env.OPENAI_API_KEY    || process.env.OPENAI_API_KEY    || '',
-    gemini:    env.GEMINI_API_KEY    || process.env.GEMINI_API_KEY    || '',
+    anthropic:       env.ANTHROPIC_API_KEY       || process.env.ANTHROPIC_API_KEY       || '',
+    openai:          env.OPENAI_API_KEY           || process.env.OPENAI_API_KEY           || '',
+    gemini:          env.GEMINI_API_KEY           || process.env.GEMINI_API_KEY           || '',
+    registry_user:   env.NSW_REGISTRY_USER        || process.env.NSW_REGISTRY_USER        || '',
+    registry_pass:   env.NSW_REGISTRY_PASS        || process.env.NSW_REGISTRY_PASS        || '',
+    registry_name:   env.NSW_REGISTRY_PARTY_NAME  || process.env.NSW_REGISTRY_PARTY_NAME  || '',
   };
 }
 
 export function setKey(provider, value) {
   const env = loadEnv();
-  const keyMap = { anthropic:'ANTHROPIC_API_KEY', openai:'OPENAI_API_KEY', gemini:'GEMINI_API_KEY' };
+  const keyMap = {
+    anthropic:     'ANTHROPIC_API_KEY',
+    openai:        'OPENAI_API_KEY',
+    gemini:        'GEMINI_API_KEY',
+    registry_user: 'NSW_REGISTRY_USER',
+    registry_pass: 'NSW_REGISTRY_PASS',
+    registry_name: 'NSW_REGISTRY_PARTY_NAME',
+  };
+  if (!keyMap[provider]) return;
   env[keyMap[provider]] = value;
   const content = Object.entries(env).map(([k,v]) => `${k}=${v}`).join('\n') + '\n';
   writeFileSync(ENV_FILE, content);
-  // Also set in process.env for immediate use
   process.env[keyMap[provider]] = value;
 }
 
