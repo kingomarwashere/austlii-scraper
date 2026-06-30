@@ -897,7 +897,7 @@ function researchThisCase(){
   openRP();
   const c = {area: currentCaseId?'':'', juris: ''};
   fetch('/api/cases/'+currentCaseId).then(r=>r.json()).then(d=>{
-    $('rpdesc').value=d.title+(d.notes?'\n\n'+d.notes:'');
+    $('rpdesc').value=d.title+(d.notes?'\\n\\n'+d.notes:'');
     if(d.jurisdiction)$('rpjur').value=d.jurisdiction;
     if(d.area_of_law)$('rparea').value=d.area_of_law;
   });
