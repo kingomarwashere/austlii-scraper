@@ -609,7 +609,7 @@ function cardHtml(r) {
     </div>
     <div class="card-actions">
       <button class="ca" onclick="event.stopPropagation();openDoc(\${r.id})">View</button>
-      <button class="ca \${isPinned?'pined':''}" onclick="event.stopPropagation();quickPin(\${r.id},\${JSON.stringify(r.title||'').replace(/'/g,'\\\\'')})">
+      <button class="ca \${isPinned?'pined':''}" data-id="\${r.id}" onclick="event.stopPropagation();quickPinBtn(this)">
         \${isPinned?'📌 Pinned':'📌 Pin'}
       </button>
       <button class="ca" onclick="event.stopPropagation();quickSummarise(\${r.id})">✨ Summary</button>
@@ -711,12 +711,23 @@ function togglePin(){
   // Update card if visible
   const card=$('c'+id);if(card)card.className='card'+(pinned[id]?' pinned':'');
 }
-function quickPin(id,title){
-  if(pinned[id]){delete pinned[id]}else{pinned[id]={id,title,feed_code:'',jurisdiction:''}}
+function quickPin(id, title){
+  if(pinned[id]){delete pinned[id]}
+  else{pinned[id]={id, title:title||'Case '+id, feed_code:'', jurisdiction:''}}
   renderTray();
-  const card=$('c'+id);if(card)card.className='card'+(pinned[id]?' pinned':'');
-  const btn=card?.querySelector('.ca.pined,.ca:nth-child(2)');
-  if(btn)btn.className='ca'+(pinned[id]?' pined':'');
+  const card=$('c'+id);
+  if(card){
+    card.className='card'+(pinned[id]?' pinned':'');
+    const btn=card.querySelector('[data-id="'+id+'"]');
+    if(btn){btn.className='ca'+(pinned[id]?' pined':'');btn.textContent=pinned[id]?'📌 Pinned':'📌 Pin';}
+  }
+}
+// Called from card button via data-id attribute (avoids string-escaping onclick args)
+function quickPinBtn(btn){
+  const id=parseInt(btn.dataset.id,10);
+  const card=$('c'+id);
+  const title=card?.querySelector('.ctitle')?.textContent||'Case '+id;
+  quickPin(id, title);
 }
 function renderTray(){
   const items=Object.values(pinned);
@@ -796,7 +807,7 @@ async function runResearch() {
             caseData.map(c=>\`<div class="rpc"><div class="rt">\${esc(c.title||'')}</div>
               <div class="rpc-actions">
                 <button class="ca" style="font-size:11px" onclick="openDoc(\${c.id})">View</button>
-                <button class="ca" style="font-size:11px" onclick="quickPin(\${c.id},\${JSON.stringify(c.title||'')})">📌 Pin</button>
+                <button class="ca" style="font-size:11px" data-id="\${c.id}" data-title="\${esc(c.title||'')}" onclick="quickPin(parseInt(this.dataset.id),this.dataset.title)">📌 Pin</button>
               </div></div>\`).join('');
         }
         break;
