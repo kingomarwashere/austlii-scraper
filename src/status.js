@@ -18,6 +18,7 @@ const DEFAULT = {
   lastStartedAt:   null,
   lastCompletedAt: null,
   nextRunAt:       null,
+  daemonPid:       null,
 };
 
 export function writeStatus(patch) {

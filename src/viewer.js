@@ -65,7 +65,10 @@ const HTML = `<!DOCTYPE html>
     transition:opacity .15s; white-space:nowrap;
   }
   button:hover { opacity:.82; }
-  button.ghost { background:var(--border); color:var(--text); }
+  button.ghost    { background:var(--border); color:var(--text); }
+  button.restart  { background:#7c2d2d; color:#fca5a5; }
+  button.restart:hover { background:#991b1b; color:#fff; }
+  button.restart:disabled { opacity:.4; cursor:default; }
 
   /* ── Layout ── */
   .main { display:grid; grid-template-columns:240px 1fr; height:calc(100vh - 105px); }
@@ -150,6 +153,7 @@ const HTML = `<!DOCTYPE html>
     <input id="q" type="search" placeholder="Search case law and legislation…" autocomplete="off">
     <button onclick="doSearch()">Search</button>
     <button class="ghost" onclick="clearSearch()">Clear</button>
+    <button class="restart" id="restart-btn" onclick="restartScraper()" title="Kill current run and restart immediately">⟳ Restart</button>
   </div>
 </header>
 
@@ -392,6 +396,35 @@ async function toggleDoc(id, el) {
 function fmt(n) { return (n??0).toLocaleString(); }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// ── Restart ───────────────────────────────────────────────────────────────────
+
+async function restartScraper() {
+  const btn = $('restart-btn');
+  btn.disabled = true;
+  btn.textContent = '⟳ Restarting…';
+  try {
+    const r = await fetch('/api/restart', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      btn.textContent = '✓ Restarted';
+      btn.style.background = 'var(--green)';
+      btn.style.color = '#000';
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = '⟳ Restart';
+        btn.style.background = '';
+        btn.style.color = '';
+      }, 3000);
+    } else {
+      btn.textContent = '✗ ' + (d.error || 'failed');
+      setTimeout(() => { btn.disabled = false; btn.textContent = '⟳ Restart'; }, 3000);
+    }
+  } catch(e) {
+    btn.textContent = '✗ Error';
+    setTimeout(() => { btn.disabled = false; btn.textContent = '⟳ Restart'; }, 3000);
+  }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 $('q').addEventListener('keydown', e => { if(e.key==='Enter') doSearch(); });
@@ -430,6 +463,18 @@ const server = createServer((req, res) => {
   if (path === '/api/stats') return json(res, stats());
 
   if (path === '/api/status') return json(res, readStatus());
+
+  if (path === '/api/restart' && req.method === 'POST') {
+    const status = readStatus();
+    const pid    = status.daemonPid;
+    if (!pid) return json(res, { ok: false, error: 'Daemon not running (no PID in status file)' }, 503);
+    try {
+      process.kill(pid, 'SIGUSR1');
+      return json(res, { ok: true, message: `Sent SIGUSR1 to daemon PID ${pid}` });
+    } catch (e) {
+      return json(res, { ok: false, error: e.message }, 500);
+    }
+  }
 
   if (path === '/api/search') {
     const q     = url.searchParams.get('q') || '';
