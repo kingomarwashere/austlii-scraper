@@ -416,30 +416,115 @@ export async function scrapeRegistryCases(partyName) {
   }
 }
 
+async function _clickTab(page, name) {
+  try {
+    const tab = await page.$(`button:has-text("${name}"), a:has-text("${name}"), [role="tab"]:has-text("${name}")`);
+    if (!tab) return false;
+    await tab.click();
+    await page.waitForTimeout(1800);
+    return true;
+  } catch { return false; }
+}
+
 export async function scrapeRegistryCaseDetail(url) {
   if (!_registryLoggedIn || !_registryPage) return { ok: false, error: 'Not logged in' };
   const page = _registryPage;
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(2000);
-    const detail = await page.evaluate(() => {
-      const get = (sel) => document.querySelector(sel)?.textContent.trim() || '';
-      const getAll = (sel) => [...document.querySelectorAll(sel)].map(el => el.textContent.trim());
-      // Extract all label-value pairs from the page
-      const pairs = {};
-      document.querySelectorAll('th, .label, dt, .field-label').forEach(th => {
-        const val = th.nextElementSibling?.textContent.trim() || '';
-        if (th.textContent.trim()) pairs[th.textContent.trim()] = val;
-      });
-      // Get hearing dates table
-      const hearings = [...document.querySelectorAll('table tr')].slice(1).map(r =>
-        [...r.querySelectorAll('td')].map(c => c.textContent.trim())
-      ).filter(r => r.length > 0);
-      return { pairs, hearings, pageText: document.body.innerText.slice(0, 8000) };
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    const header = await page.evaluate(() => {
+      const cl = s => (s||'').replace(/\s+/g,' ').trim();
+      const title  = cl(document.querySelector('h1,h2,.case-title,[class*="caseTitle"],[class*="case-name"]')?.textContent || document.title);
+      const status = cl(document.querySelector('[class*="status"],[class*="badge"],[class*="Status"]')?.textContent || '');
+      const matter = (title.match(/\((\d{4}\/\d+)\)/) || title.match(/(\d{4}\/\d+)/))?.[1] || '';
+      return { title, status, matter_number: matter };
     });
-    return { ok: true, ...detail };
+
+    // ── Proceedings / charges ────────────────────────────────────────────────
+    await _clickTab(page, 'Proceedings');
+    const proceedings = await page.evaluate(() => {
+      const cl = s => (s||'').replace(/\s+/g,' ').trim();
+      // Table rows
+      const rows = [...document.querySelectorAll('table tbody tr')];
+      if (rows.length) return rows.map(r => cl(r.textContent)).filter(Boolean);
+      // Fallback: list items or divs with charge numbers
+      return [...document.querySelectorAll('[class*="proceed"],[class*="charge"],li')]
+        .map(el => cl(el.textContent)).filter(t => /\d{4}\/\d+/.test(t) || t.length > 15).slice(0,20);
+    });
+
+    // ── Court dates ──────────────────────────────────────────────────────────
+    await _clickTab(page, 'Court dates');
+    const courtDates = await page.evaluate(() => {
+      const cl = s => (s||'').replace(/\s+/g,' ').trim();
+      const rows = [...document.querySelectorAll('table tbody tr')];
+      return rows.map(row => {
+        const cells = [...row.querySelectorAll('td,th')].map(c => cl(c.textContent));
+        // Also grab any "heard at" detail below the row
+        const detail = cl(row.nextElementSibling?.textContent || '');
+        return {
+          date:              cells[0] || '',
+          listing_for:       cells[1] || '',
+          presiding_officer: cells[2] || '',
+          heard_at:          cells[3] || detail || '',
+        };
+      }).filter(r => r.date && r.date !== 'Date');
+    });
+
+    // ── Judgments & orders ───────────────────────────────────────────────────
+    await _clickTab(page, 'Judgments & orders');
+    const orders = await page.evaluate(() => {
+      const cl = s => (s||'').replace(/\s+/g,' ').trim();
+      // Try dedicated order blocks first
+      const blocks = [...document.querySelectorAll('[class*="order"],[class*="judgment"],[class*="Order"]')];
+      if (blocks.length) return blocks.map(b => cl(b.textContent)).filter(t => t.length > 15);
+      // Fallback: paragraphs containing "Order" or "order"
+      const paras = [...document.querySelectorAll('p,div,li,td')]
+        .map(el => cl(el.textContent))
+        .filter(t => t.length > 20 && t.length < 2000 && /order|adjourne|hearing|plea|verdict|sentence|judgment/i.test(t));
+      // Deduplicate
+      const seen = new Set(); return paras.filter(t => { if(seen.has(t)) return false; seen.add(t); return true; });
+    });
+
+    // ── Filed documents ──────────────────────────────────────────────────────
+    await _clickTab(page, 'Filed documents');
+    const filedDocs = await page.evaluate(() => {
+      const cl = s => (s||'').replace(/\s+/g,' ').trim();
+      return [...document.querySelectorAll('table tbody tr')]
+        .map(r => cl(r.textContent)).filter(Boolean).slice(0, 20);
+    });
+
+    // ── Derive key fields ────────────────────────────────────────────────────
+    // Latest presiding officer
+    const lastHearing    = courtDates.filter(h => h.presiding_officer).slice(-1)[0];
+    const presiding      = lastHearing?.presiding_officer || '';
+    // Next/upcoming hearing
+    const upcoming = courtDates.find(h => {
+      if (!h.date) return false;
+      const d = new Date(h.date.replace(/(\d{1,2})\s(\w+)\s(\d{2})$/, '$1 $2 20$3'));
+      return d > new Date();
+    });
+    // Charges summary
+    const chargesSummary = proceedings.filter(p => /\d{4}\/\d+-\d+/.test(p)).join(' | ') || proceedings.slice(0,3).join(' | ');
+
+    return {
+      ok: true,
+      header,
+      proceedings,
+      courtDates,
+      orders,
+      filedDocs,
+      presiding_officer: presiding,
+      next_hearing: upcoming || null,
+      charges_summary: chargesSummary,
+    };
   } catch (e) {
-    return { ok: false, error: e.message };
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 50 }).catch(() => null);
+    return {
+      ok: false, error: e.message,
+      screenshot: screenshot ? 'data:image/jpeg;base64,' + screenshot.toString('base64') : null,
+    };
   }
 }
 

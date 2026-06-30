@@ -1070,29 +1070,73 @@ async function syncRegistry(){
     }
 
     const existing = await (await fetch('/api/cases')).json();
-    const existingNums = new Set(existing.map(c=>c.matter_number).filter(Boolean));
-    let added=0, skipped=0;
+    const existingByMatter = Object.fromEntries(existing.filter(c=>c.matter_number).map(c=>[c.matter_number, c]));
+    let added=0, updated=0;
     for (const rc of cases) {
+      const dt = rc.detail || {};
       const mn = (rc.matter_number||'').trim();
-      if (mn && existingNums.has(mn)) { skipped++; continue; }
-      const notes = [
-        rc.next_time ? 'Hearing time: '+rc.next_time : '',
-        rc.filed_date ? 'Filed: '+rc.filed_date : '',
-        rc.detail_url ? 'Registry: '+rc.detail_url : '',
-      ].filter(Boolean).join('\\n');
-      await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
-        title:         rc.title || rc.matter_number || 'Registry Case',
-        court:         rc.court || 'NSW Local/District/Supreme Court',
-        matter_number: rc.matter_number || '',
+
+      // Build rich notes from all available data
+      const noteParts = [];
+      if (dt.presiding_officer)   noteParts.push('Magistrate/Judge: '+dt.presiding_officer);
+      if (dt.charges_summary)     noteParts.push('Charges: '+dt.charges_summary);
+      if (dt.next_hearing?.heard_at) noteParts.push('Next hearing location: '+dt.next_hearing.heard_at);
+      if (rc.next_time)           noteParts.push('Time: '+rc.next_time);
+      if (rc.filed_date)          noteParts.push('Filed: '+rc.filed_date);
+      if (rc.detail_url)          noteParts.push('Registry: '+rc.detail_url);
+
+      // Best next date: from detail upcoming hearing or fallback
+      const nextDate = dt.next_hearing?.date ? parseRegistryDate(dt.next_hearing.date) : parseRegistryDate(rc.next_date);
+
+      // Court name from most recent hearing
+      const lastHearing = (dt.courtDates||[]).filter(h=>h.heard_at).slice(-1)[0];
+      const courtName = lastHearing?.heard_at?.split('-').slice(-1)[0]?.trim()
+                     || rc.court || 'NSW Local Court';
+
+      const caseData = {
+        title:         rc.title || mn || 'Registry Case',
+        court:         courtName,
+        matter_number: mn,
         status:        mapRegistryStatus(rc.status),
-        next_date:     parseRegistryDate(rc.next_date),
-        notes, jurisdiction:'nsw', area_of_law:'criminal',
-      })});
-      added++;
+        next_date:     nextDate,
+        notes:         noteParts.join('\\n'),
+        jurisdiction:  'nsw',
+        area_of_law:   'criminal',
+      };
+
+      let caseId;
+      if (mn && existingByMatter[mn]) {
+        // Update existing case
+        const existing_id = existingByMatter[mn].id;
+        await fetch('/api/cases/'+existing_id, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(caseData)});
+        caseId = existing_id; updated++;
+      } else {
+        // Create new case
+        const res2 = await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(caseData)});
+        const created = await res2.json();
+        caseId = created.id; added++;
+      }
+
+      // Add court date events to timeline
+      for (const hearing of (dt.courtDates||[])) {
+        if (!hearing.date) continue;
+        const evDate = parseRegistryDate(hearing.date);
+        const evTitle = [hearing.listing_for, hearing.presiding_officer].filter(Boolean).join(' — ');
+        const evDesc  = hearing.heard_at || '';
+        await fetch('/api/cases/'+caseId+'/events', {method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ title: evTitle||'Court date', event_type:'hearing', event_date:evDate, description:evDesc })});
+      }
+
+      // Add orders as timeline entries
+      for (const order of (dt.orders||[]).slice(0,10)) {
+        if (order.length < 20) continue;
+        await fetch('/api/cases/'+caseId+'/events', {method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ title: order.slice(0,120), event_type:'order', description: order.length>120?order:'', event_date: nextDate||null })});
+      }
     }
 
     setRegBadge('connected',\`Connected · \${cases.length} case\${cases.length!==1?'s':''}\`);
-    setRegStatus(\`✓ Synced: \${added} added, \${skipped} already existed\`,'var(--green)');
+    setRegStatus(\`✓ Synced: \${added} added, \${updated} updated (with orders + court dates)\`,'var(--green)');
     await loadWarRoom();
   } catch(e) {
     setRegBadge('error','Error'); setRegStatus('Error: '+e.message,'var(--red)');
@@ -2451,14 +2495,26 @@ h2{color:#ff0099;margin-bottom:12px}pre{background:#0a0a0a;padding:12px;border-r
     const keys = gk();
     const partyName = (JSON.parse(await body(req)).partyName || keys.registry_name || '').trim();
     if (!partyName) return jres(res, { ok: false, error: 'No party name — set it in Settings' }, 400);
-    // Auto-login if credentials stored
     const { registry_user: u, registry_pass: p } = keys;
     if (u && p) {
       const login = await loginNSWRegistry(u, p);
       if (!login.ok) return jres(res, { ok: false, error: 'Registry login failed: ' + login.error }, 401);
     }
     const result = await scrapeRegistryCases(partyName);
-    return jres(res, result);
+    if (!result.ok) return jres(res, result);
+
+    // Auto-enrich each case with full detail (court dates, orders, magistrate, charges)
+    const enriched = [];
+    for (const c of result.cases || []) {
+      if (c.detail_url) {
+        console.log('[Registry] Fetching detail for:', c.matter_number, c.detail_url);
+        const detail = await scrapeRegistryCaseDetail(c.detail_url);
+        enriched.push({ ...c, detail: detail.ok ? detail : null });
+      } else {
+        enriched.push(c);
+      }
+    }
+    return jres(res, { ...result, cases: enriched });
   }
   if (path==='/api/registry/case' && req.method==='POST') {
     const { url: caseUrl } = JSON.parse(await body(req));
