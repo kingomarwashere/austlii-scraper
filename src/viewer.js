@@ -6,7 +6,8 @@ import { createServer } from 'http';
 import { getDb, stats } from './db.js';
 import { readStatus } from './status.js';
 
-const PORT = process.env.PORT || 4242;
+const PORT          = process.env.PORT || 4242;
+const ADMIN_PASSWORD = 'boob';
 
 // ── Court / feed display names ─────────────────────────────────────────────────
 const COURT = {
@@ -287,6 +288,23 @@ aside{background:var(--surface);border-right:1px solid var(--border);overflow-y:
       <div class="icon">⚖️</div>
       <p>Search Australian case law and legislation</p>
       <small>143,000+ documents · press <span class="kbd">/</span> to search · <span class="kbd">Esc</span> to close</small>
+    </div>
+  </div>
+</div>
+
+<!-- Admin login modal -->
+<div id="admin-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:200;display:none;align-items:center;justify-content:center;backdrop-filter:blur(6px)" onclick="if(event.target===this)closeAdmin()">
+  <div style="background:var(--surface);border:1px solid var(--border2);border-radius:14px;width:340px;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,.7)">
+    <div style="font-size:20px;margin-bottom:4px">🔐</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px">Admin required</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:20px">Enter the admin password to restart the scraper.</div>
+    <input id="admin-pw" type="password" placeholder="Password" autocomplete="current-password"
+      style="width:100%;background:var(--bg);border:1.5px solid var(--border2);color:var(--text);padding:9px 12px;border-radius:8px;font-size:14px;outline:none;margin-bottom:12px"
+      onkeydown="if(event.key==='Enter')submitAdmin()">
+    <div id="admin-err" style="font-size:12px;color:var(--red);min-height:16px;margin-bottom:12px"></div>
+    <div style="display:flex;gap:8px">
+      <button class="btn-primary" style="flex:1" onclick="submitAdmin()">Confirm</button>
+      <button class="btn-ghost" onclick="closeAdmin()">Cancel</button>
     </div>
   </div>
 </div>
@@ -659,14 +677,53 @@ async function openDocById(id){
   $('btn-bookmark').classList.toggle('saved',saved);
 }
 
-// ── Restart ───────────────────────────────────────────────────────────────────
-async function restartScraper(){
-  const btn=$('restart-btn'); btn.disabled=true; btn.textContent='⟳ Restarting…';
-  try{
-    const r=await fetch('/api/restart',{method:'POST'});const d=await r.json();
-    if(d.ok){btn.textContent='✓ Done';btn.style.background='var(--green)';btn.style.color='#000';setTimeout(()=>{btn.disabled=false;btn.textContent='⟳ Restart';btn.style.background='';btn.style.color=''},3000)}
-    else{btn.textContent='✗ '+d.error;setTimeout(()=>{btn.disabled=false;btn.textContent='⟳ Restart'},3000)}
-  }catch(e){btn.textContent='✗ Error';setTimeout(()=>{btn.disabled=false;btn.textContent='⟳ Restart'},3000)}
+// ── Admin auth ────────────────────────────────────────────────────────────────
+function restartScraper(){
+  // Already authenticated this session — go straight to restart
+  if(sessionStorage.getItem('admin-pw')){ doRestart(); return; }
+  $('admin-pw').value=''; $('admin-err').textContent='';
+  $('admin-backdrop').style.display='flex';
+  setTimeout(()=>$('admin-pw').focus(), 80);
+}
+
+function closeAdmin(){ $('admin-backdrop').style.display='none'; }
+
+async function submitAdmin(){
+  const pw = $('admin-pw').value;
+  if(!pw) return;
+  const r = await fetch('/api/restart', { method:'POST', headers:{'x-admin-password': pw} });
+  if(r.status===401){
+    $('admin-err').textContent='Wrong password.';
+    $('admin-pw').select();
+    return;
+  }
+  // Success — cache pw for this session and show result
+  sessionStorage.setItem('admin-pw', pw);
+  closeAdmin();
+  showRestartResult((await r.json()).ok);
+}
+
+async function doRestart(){
+  const pw = sessionStorage.getItem('admin-pw') || '';
+  const r  = await fetch('/api/restart', { method:'POST', headers:{'x-admin-password': pw} });
+  if(r.status===401){
+    // Session pw stale — clear and re-prompt
+    sessionStorage.removeItem('admin-pw');
+    restartScraper();
+    return;
+  }
+  showRestartResult((await r.json()).ok);
+}
+
+function showRestartResult(ok){
+  const btn=$('restart-btn'); btn.disabled=true;
+  if(ok){
+    btn.textContent='✓ Restarted'; btn.style.background='var(--green)'; btn.style.color='#000';
+    setTimeout(()=>{ btn.disabled=false; btn.textContent='⟳ Restart'; btn.style.background=''; btn.style.color=''; }, 3000);
+  } else {
+    btn.textContent='✗ Failed';
+    setTimeout(()=>{ btn.disabled=false; btn.textContent='⟳ Restart'; }, 3000);
+  }
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
@@ -712,6 +769,8 @@ const server = createServer((req, res) => {
   if (path==='/api/status') return jres(res, readStatus());
 
   if (path==='/api/restart' && req.method==='POST') {
+    if (req.headers['x-admin-password'] !== ADMIN_PASSWORD)
+      return jres(res, { ok:false, error:'Unauthorised' }, 401);
     const pid = readStatus().daemonPid;
     if (!pid) return jres(res, { ok:false, error:'Daemon not running' }, 503);
     try { process.kill(pid,'SIGUSR1'); return jres(res, { ok:true }); }
