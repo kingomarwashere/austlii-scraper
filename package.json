@@ -17,9 +17,12 @@
     "stats": "node src/stats.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.107.0",
     "better-sqlite3": "^9.6.0",
+    "dotenv": "^17.4.2",
     "fast-xml-parser": "^4.4.0",
     "node-fetch": "^3.3.2",
+    "openai": "^6.45.0",
     "p-limit": "^6.1.0",
     "p-retry": "^6.2.0",
     "playwright": "^1.61.1"

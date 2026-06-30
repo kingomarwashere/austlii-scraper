@@ -17,21 +17,23 @@ export function getDb() {
 
   _db.exec(`
     CREATE TABLE IF NOT EXISTS documents (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      guid        TEXT    UNIQUE NOT NULL,
-      feed_code   TEXT    NOT NULL,
-      type        TEXT    NOT NULL,      -- 'case_law' | 'legislation'
-      jurisdiction TEXT   NOT NULL,
-      title       TEXT,
-      url         TEXT,
-      pub_date    TEXT,
-      description TEXT,
-      full_text   TEXT,
-      fetched_at  TEXT    DEFAULT (datetime('now')),
-      updated_at  TEXT    DEFAULT (datetime('now'))
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      guid         TEXT    UNIQUE NOT NULL,
+      feed_code    TEXT    NOT NULL,
+      type         TEXT    NOT NULL,
+      jurisdiction TEXT    NOT NULL,
+      title        TEXT,
+      url          TEXT,
+      pub_date     TEXT,
+      description  TEXT,
+      full_text    TEXT,
+      summary      TEXT,
+      area_of_law  TEXT,
+      fetched_at   TEXT    DEFAULT (datetime('now')),
+      updated_at   TEXT    DEFAULT (datetime('now'))
     );
 
-    CREATE INDEX IF NOT EXISTS idx_type        ON documents(type);
+    CREATE INDEX IF NOT EXISTS idx_type          ON documents(type);
     CREATE INDEX IF NOT EXISTS idx_jurisdiction ON documents(jurisdiction);
     CREATE INDEX IF NOT EXISTS idx_feed_code   ON documents(feed_code);
     CREATE INDEX IF NOT EXISTS idx_pub_date    ON documents(pub_date);
@@ -71,6 +73,13 @@ export function getDb() {
         VALUES (new.id, new.title, new.description, new.full_text);
       END;
   `);
+
+  // Safe migrations for columns added after initial schema
+  for (const col of ['summary TEXT', 'area_of_law TEXT']) {
+    try { _db.exec(`ALTER TABLE documents ADD COLUMN ${col}`); } catch {}
+  }
+  // Index for area_of_law created after migration so column definitely exists
+  try { _db.exec(`CREATE INDEX IF NOT EXISTS idx_area_of_law ON documents(area_of_law)`); } catch {}
 
   return _db;
 }
