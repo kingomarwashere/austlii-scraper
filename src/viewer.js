@@ -986,8 +986,7 @@ async function syncRegistry(){
   try {
     setRegBadge('connecting','Logging in…');
     setRegStatus('Connecting to NSW Registry…','var(--amber)');
-    const keys2 = await (await fetch('/api/models')).json();
-    const loginR = await fetch('/api/registry/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:keys2.keys.registry_user, password:keys2.keys.registry_pass})});
+    const loginR = await fetch('/api/registry/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
     const loginD = await loginR.json();
 
     if (loginD.needs_2fa) {
@@ -1987,7 +1986,14 @@ const server = createServer(async (req, res) => {
   if (path==='/api/status') return jres(res, readStatus());
   if (path==='/api/models') {
     const k=gk(); const ms=modelStatus();
-    return jres(res, { ...ms, keys:{ anthropic:!!k.anthropic, openai:!!k.openai, gemini:!!k.gemini } });
+    return jres(res, { ...ms, keys:{
+      anthropic:     !!k.anthropic,
+      openai:        !!k.openai,
+      gemini:        !!k.gemini,
+      registry_user: !!k.registry_user,
+      registry_pass: !!k.registry_pass,
+      registry_name: k.registry_name || '',
+    }});
   }
 
   // ── Admin ──
@@ -2196,8 +2202,11 @@ h2{color:#ff0099;margin-bottom:12px}pre{background:#0a0a0a;padding:12px;border-r
     res.writeHead(200, {'Content-Type':'text/html'}); res.end(html); return;
   }
   if (path==='/api/registry/login' && req.method==='POST') {
-    const { username, password } = JSON.parse(await body(req));
-    const result = await loginNSWRegistry(username, password);
+    const stored = gk();
+    const u = stored.registry_user;
+    const p = stored.registry_pass;
+    if (!u || !p) return jres(res, { ok: false, error: 'No registry credentials saved — add them in ⚙ Settings' }, 400);
+    const result = await loginNSWRegistry(u, p);
     return jres(res, result, result.ok ? 200 : result.needs_2fa ? 202 : 401);
   }
   if (path==='/api/registry/2fa' && req.method==='POST') {
