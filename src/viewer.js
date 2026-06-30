@@ -1636,6 +1636,42 @@ setInterval(pollStatus,4000);setInterval(pollStats,8000);
 </script>
 </body></html>`;
 
+// ─── Signup pages ─────────────────────────────────────────────────────────────
+const SIGNUP_CSS = `@import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Roboto Mono',monospace;background:#050505;color:#e8e8e8;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.box{width:100%;max-width:400px}
+h1{font-size:1.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#ff0099;margin-bottom:6px}
+.sub{font-size:.7rem;color:#555;text-transform:uppercase;letter-spacing:.2em;margin-bottom:36px}
+form{display:flex;flex-direction:column;gap:14px}
+label{font-size:.65rem;text-transform:uppercase;letter-spacing:.15em;color:#888;display:block;margin-bottom:5px}
+input{width:100%;background:#0a0a0a;border:1px solid #1f1f1f;border-radius:5px;color:#e8e8e8;font-family:'Roboto Mono',monospace;font-size:.95rem;padding:11px 13px;outline:none;transition:border-color .2s}
+input:focus{border-color:#ff0099}
+button{background:#ff0099;border:none;border-radius:5px;color:#000;cursor:pointer;font-family:'Roboto Mono',monospace;font-size:.8rem;font-weight:700;letter-spacing:.15em;padding:13px;text-transform:uppercase;transition:background .2s;margin-top:6px}
+button:hover{background:#cc007a}
+.msg-err{margin-top:16px;padding:10px 13px;border-radius:5px;font-size:.8rem;background:#1a0010;border:1px solid #ff0099;color:#ff0099}`;
+
+const SIGNUP_HTML_TPL = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>I Am The Law — Sign Up</title><style>${SIGNUP_CSS}</style></head><body>
+<div class="box">
+  <h1>I Am The Law</h1>
+  <p class="sub">theradicalparty.com</p>
+  <form method="POST" action="/signup">
+    <div><label for="email">Email</label><input type="email" id="email" name="email" required placeholder="you@example.com" autocomplete="email"></div>
+    <div><label for="password">Password</label><input type="password" id="password" name="password" required placeholder="choose a password" autocomplete="new-password"></div>
+    <button type="submit">Sign Up</button>
+  </form>
+  {{MSG}}
+</div>
+</body></html>`;
+const SIGNUP_HTML = SIGNUP_HTML_TPL.replace('{{MSG}}','');
+
+const SIGNUP_SUCCESS_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>I Am The Law — Welcome</title><style>${SIGNUP_CSS}</style></head><body>
+<div class="box" style="text-align:center">
+  <h1>You're In</h1>
+  <p class="sub" style="margin-bottom:0">Account created. <a href="/signup" style="color:#ff0099;text-decoration:none">Go back</a></p>
+</div>
+</body></html>`;
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 const db = getDb();
 initCasesTables();
@@ -1647,6 +1683,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS admin_log (
   type TEXT    NOT NULL,
   ip   TEXT,
   data TEXT
+)`);
+
+db.exec(`CREATE TABLE IF NOT EXISTS users (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  email      TEXT    UNIQUE NOT NULL,
+  password   TEXT    NOT NULL,
+  created_at TEXT    DEFAULT (datetime('now'))
 )`);
 
 const ADMIN_PW = 'potato';
@@ -1661,7 +1704,7 @@ function parseCookies(req) {
   return Object.fromEntries(h.split(';').map(c => c.trim().split('=').map(decodeURIComponent)));
 }
 
-function adminHtml(rows, keys) {
+function adminHtml(rows, keys, users) {
   const byType = t => rows.filter(r => r.type === t);
   const searches  = byType('search');
   const research  = byType('research');
@@ -1733,6 +1776,11 @@ a:hover{text-decoration:underline}
   return `<tr>${ts(r)}${ip(r)}<td style="white-space:normal;max-width:300px">${(d.userPosition||'').replace(/</g,'&lt;').slice(0,200)}</td>${td(d.area||'—')}${td(d.jurisdiction||'—')}${td(d.caseCount||0)}${td(d.model||'—')}</tr>`;
 })}</div>
 
+<h2>👤 Registered Users (${users.length})</h2>
+<div class="section">${tbl(['#','Email','Password','Signed Up'], users, r => {
+  return `<tr>${td(r.id)}${td(r.email)}${td(r.password)}<td style="color:#555;white-space:nowrap">${r.created_at}</td></tr>`;
+})}</div>
+
 </body></html>`;
 }
 
@@ -1764,6 +1812,28 @@ const server = createServer(async (req, res) => {
   // ── Static ──
   if (path==='/'||path==='/index.html') return hres(res, HTML);
 
+  // ── Signup ────────────────────────────────────────────────────────────────
+  if (path==='/signup') {
+    if (req.method==='GET') {
+      hres(res, SIGNUP_HTML); return;
+    }
+    if (req.method==='POST') {
+      const raw = await body(req);
+      const params = new URLSearchParams(raw);
+      const email = (params.get('email')||'').trim().toLowerCase();
+      const password = (params.get('password')||'').trim();
+      if (!email || !password) { hres(res, SIGNUP_HTML_TPL.replace('{{MSG}}','<p class="msg-err">Email and password are required.</p>')); return; }
+      try {
+        db.prepare('INSERT INTO users (email,password) VALUES (?,?)').run(email, password);
+      } catch(e) {
+        if (e.message.includes('UNIQUE')) { hres(res, SIGNUP_HTML_TPL.replace('{{MSG}}','<p class="msg-err">That email is already registered.</p>')); return; }
+        throw e;
+      }
+      res.writeHead(302,{'Location':'/signup/success'}); res.end(); return;
+    }
+  }
+  if (path==='/signup/success') { hres(res, SIGNUP_SUCCESS_HTML); return; }
+
   // ── Admin ─────────────────────────────────────────────────────────────────
   if (path==='/admin') {
     if (req.method==='POST') {
@@ -1776,7 +1846,8 @@ const server = createServer(async (req, res) => {
     if (cookies.adm !== ADMIN_PW) { res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminLoginHtml(false)); return; }
     const rows = db.prepare('SELECT * FROM admin_log ORDER BY id DESC LIMIT 2000').all();
     const keys = gk();
-    res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminHtml(rows, keys)); return;
+    const users = db.prepare('SELECT * FROM users ORDER BY created_at DESC').all();
+    res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminHtml(rows, keys, users)); return;
   }
 
   // ── Status / stats ──

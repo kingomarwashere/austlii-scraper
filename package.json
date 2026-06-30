@@ -1,7 +1,7 @@
 {
-  "name": "austlii-scraper",
+  "name": "iamthelaw",
   "version": "0.1.0",
-  "description": "AustLII full-corpus scraper — legislation and case law RSS feeds",
+  "description": "I Am The Law — Australian Legal Engine",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
