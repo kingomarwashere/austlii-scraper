@@ -2282,7 +2282,7 @@ function getSession(req) {
   return row || null;
 }
 
-function adminHtml(rows, keys, users) {
+function adminHtml(rows, keys, users, scraper) {
   const byType = t => rows.filter(r => r.type === t);
   const searches  = byType('search');
   const research  = byType('research');
@@ -2321,6 +2321,80 @@ a:hover{text-decoration:underline}
 </style></head><body>
 <h1>⚡ IAMTHELAW — ADMIN</h1>
 <div class="sub"><a href="/">← Back to app</a> &nbsp;·&nbsp; ${rows.length} total events logged</div>
+
+<h2>🕷 Scraper Status</h2>
+<div class="section">
+  ${(() => {
+    const s = scraper.status;
+    const stat = scraper.stats;
+    const toSyd2 = utc => { try { return utc ? new Date(utc.includes('Z')||utc.includes('+')?utc:utc+'Z').toLocaleString('en-AU',{timeZone:'Australia/Sydney',dateStyle:'short',timeStyle:'short'}) : '—'; } catch { return utc||'—'; } };
+    const phaseDot = {idle:'#555',waiting:'#f59e0b',running:'#22c55e',crashed:'#ef4444'}[s.phase]||'#555';
+    const phaseName = {idle:'Idle',waiting:'Waiting — next run scheduled',running:'🟢 Scraping now',crashed:'💥 Crashed — retrying soon'}[s.phase]||s.phase;
+    const pct = s.feedsTotal > 0 ? Math.round((s.feedsDone/s.feedsTotal)*100) : 0;
+    const daemonRunning = s.daemonPid ? (() => { try { process.kill(s.daemonPid, 0); return true; } catch { return false; } })() : false;
+
+    const histRows = (scraper.history||[]).map(h =>
+      `<tr><td>${h.day}</td><td>${h.feeds}</td><td style="color:#22c55e">${h.new_docs||0}</td><td>${h.found||0}</td><td style="color:${h.errors>0?'#ef4444':'#555'}">${h.errors||0}</td></tr>`
+    ).join('');
+
+    const errFeeds = (scraper.topErrors||[]).slice(0,5).map(f =>
+      `<div style="margin-bottom:4px"><span style="color:#ef4444">${f.errors}/${f.runs}</span> <span style="color:#888">${f.feed_code}</span></div>`
+    ).join('');
+
+    const fullTextPct = stat.total > 0 ? Math.round((stat.withFullText/stat.total)*100) : 0;
+
+    return `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+      <div><div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Status</div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:8px;height:8px;border-radius:50%;background:${phaseDot};flex-shrink:0"></div><b style="color:#e8e8e8">${phaseName}</b></div>
+      </div>
+      <div><div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Daemon</div>
+        <b style="color:${daemonRunning?'#22c55e':'#ef4444'}">${daemonRunning?'Running (PID '+s.daemonPid+')':'Not running'}</b>
+      </div>
+      <div><div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Total documents</div>
+        <b style="color:#e8e8e8">${stat.total.toLocaleString()}</b>
+      </div>
+      <div><div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Full text indexed</div>
+        <b style="color:${fullTextPct>50?'#22c55e':'#f59e0b'}">${stat.withFullText.toLocaleString()} (${fullTextPct}%)</b>
+      </div>
+    </div>
+
+    ${s.phase==='running' ? `
+    <div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px">
+        <span style="color:#888">Feeds: ${s.feedsDone} / ${s.feedsTotal}</span>
+        <span style="color:#ff0099">${pct}%</span>
+      </div>
+      <div style="background:#111;border-radius:4px;height:6px"><div style="background:#ff0099;height:6px;border-radius:4px;width:${pct}%;transition:width .3s"></div></div>
+      ${s.currentFeed ? `<div style="font-size:10px;color:#555;margin-top:4px">Current: ${s.currentFeed}</div>` : ''}
+    </div>` : ''}
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:16px;font-size:11px">
+      <div style="background:#111;border-radius:6px;padding:10px"><div style="color:#555;margin-bottom:3px">Last run started</div><b>${toSyd2(s.lastStartedAt)}</b></div>
+      <div style="background:#111;border-radius:6px;padding:10px"><div style="color:#555;margin-bottom:3px">Last run completed</div><b>${toSyd2(s.lastCompletedAt)}</b></div>
+      <div style="background:#111;border-radius:6px;padding:10px"><div style="color:#555;margin-bottom:3px">Next run</div><b style="color:#f59e0b">${toSyd2(s.nextRunAt)}</b></div>
+      <div style="background:#111;border-radius:6px;padding:10px"><div style="color:#555;margin-bottom:3px">Run #${s.runCount} stats</div>
+        <span style="color:#22c55e">+${s.newThisRun} new</span> &nbsp;
+        <span style="color:#888">${s.foundThisRun} found</span> &nbsp;
+        <span style="color:#ef4444">${s.failedThisRun} failed</span>
+      </div>
+    </div>
+
+    ${histRows ? `
+    <div style="margin-bottom:14px">
+      <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">7-Day History</div>
+      <table><thead><tr><th>Date</th><th>Feeds run</th><th>New docs</th><th>Found</th><th>Errors</th></tr></thead><tbody>${histRows}</tbody></table>
+    </div>` : ''}
+
+    ${errFeeds ? `
+    <div>
+      <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Top failing feeds (errors/runs)</div>
+      ${errFeeds}
+      <div style="font-size:10px;color:#555;margin-top:6px">These feeds are failing — likely Cloudflare-protected or URL changes. Needs investigation.</div>
+    </div>` : ''}
+    `;
+  })()}
+</div>
 
 <h2>🔑 Current API Keys (.env)</h2>
 <div class="section">
@@ -2451,7 +2525,16 @@ const server = createServer(async (req, res) => {
     const rows = db.prepare('SELECT * FROM admin_log ORDER BY id DESC LIMIT 2000').all();
     const keys = gk();
     const users = db.prepare('SELECT * FROM users ORDER BY created_at DESC').all();
-    res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminHtml(rows, keys, users)); return;
+    const scraper = {
+      status: readStatus(),
+      stats: {
+        total:       db.prepare('SELECT COUNT(*) n FROM documents').get().n,
+        withFullText: db.prepare('SELECT COUNT(*) n FROM documents WHERE full_text IS NOT NULL').get().n,
+      },
+      history: db.prepare(`SELECT DATE(ran_at) day, COUNT(*) feeds, SUM(items_new) new_docs, SUM(items_found) found, SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) errors FROM feed_runs WHERE ran_at >= datetime('now','-7 days') GROUP BY DATE(ran_at) ORDER BY day DESC`).all(),
+      topErrors: db.prepare(`SELECT feed_code, COUNT(*) runs, SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) errors FROM feed_runs WHERE ran_at >= datetime('now','-7 days') GROUP BY feed_code HAVING errors > 0 ORDER BY errors DESC LIMIT 8`).all(),
+    };
+    res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminHtml(rows, keys, users, scraper)); return;
   }
 
   // ── Status / stats ──
