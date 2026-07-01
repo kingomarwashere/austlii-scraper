@@ -1409,7 +1409,7 @@ async function loadInsight(id) {
       <div class="ins-case">
         <div class="ins-case-title" onclick="openDoc(\${r.id})">\${esc(r.title||'')}</div>
         <div class="ins-case-meta">\${(r.jurisdiction||'').toUpperCase()} \${(r.pub_date||'').slice(0,4)}</div>
-        <button class="ca" style="font-size:11px;flex-shrink:0" onclick="quickPin(\${r.id},\${JSON.stringify(r.title||'').replace(/'/g,'\\\\\'')})">📌</button>
+        <button class="ca" style="font-size:11px;flex-shrink:0" data-id="\${r.id}" data-title="\${esc(r.title||'')}" onclick="quickPin(parseInt(this.dataset.id),this.dataset.title)">📌</button>
       </div>
     \`).join('');
   } catch(e) { $('ins-case-list').innerHTML='<div style="color:var(--red);font-size:12px">Error: '+esc(e.message)+'</div>'; }
@@ -1433,7 +1433,7 @@ async function runInsightSearch() {
       <div class="ins-case">
         <div class="ins-case-title" onclick="openDoc(\${r.id})">\${esc(r.title||'')}</div>
         <div class="ins-case-meta">\${(r.jurisdiction||'').toUpperCase()} \${(r.pub_date||'').slice(0,4)}</div>
-        <button class="ca" style="font-size:11px;flex-shrink:0" onclick="quickPin(\${r.id},\${JSON.stringify(r.title||'')})">📌</button>
+        <button class="ca" style="font-size:11px;flex-shrink:0" data-id="\${r.id}" data-title="\${esc(r.title||'')}" onclick="quickPin(parseInt(this.dataset.id),this.dataset.title)">📌</button>
       </div>
     \`).join('');
   } catch(e) { $('ins-case-list').innerHTML='<div style="color:var(--red);font-size:12px">Error: '+esc(e.message)+'</div>'; }
